@@ -1,0 +1,241 @@
+# Midterm
+import machine
+from machine import Pin, SoftI2C, PWM, ADC
+import time
+import neopixel
+import math
+import veml6040
+import random
+buzzer = PWM(Pin(23))
+button_Play = Pin(34, Pin.IN, Pin.PULL_UP)
+button_Train = Pin(35, Pin.IN, Pin.PULL_UP)
+servo = PWM(Pin(4), freq=50, duty_u16=0)
+np = neopixel.NeoPixel(machine.Pin(15), 2)
+pin = machine.Pin(35, machine.Pin.IN, machine.Pin.PULL_UP)
+buzzer.duty(10)
+
+
+# COLOR SENSING
+i2c = SoftI2C(scl = Pin(22), sda = Pin(21))
+print(i2c.scan())
+DEBOUNCE_MS = 200
+last_press = 0
+
+pressed_flag = False
+STATE_PLAY = False
+STATE_TRAIN = True
+
+def playButton(p):
+    global STATE_PLAY
+    global STATE_TRAIN
+    STATE_PLAY = True
+    STATE_TRAIN = False
+
+def trainButton(p):
+    global pressed_flag
+    global STATE_TRAIN
+    STATE_TRAIN = True
+    pressed_flag = True
+  
+button_Train.irq(trigger=Pin.IRQ_RISING, handler=trainButton)
+button_Play.irq(trigger=Pin.IRQ_RISING, handler=playButton)
+
+
+sensor = veml6040.VEML6040(i2c)
+sensor.trigger_measurement()
+
+
+def k_nearest_neighbor(x,y,z, k = 7):
+    distances = []
+    for index, d in enumerate(data):
+        dist = math.sqrt((x-d[0])**2+(y-d[1])**2+(z-d[2])**2)
+        distances.append([dist,d[3]])
+    
+    distances.sort()
+    distances = distances[:k] #get k distances
+    classes = []
+    for dist in distances:
+        classes.append(dist[1])
+#     print("k classes", classes)
+    most_number_of_closest_classes = max(set(classes), key = classes.count)
+#     print("max classes ", most_number_of_closest_classes)
+    
+    return most_number_of_closest_classes
+# MOTOR CLASS
+class Count(object):
+    def __init__(self,A,B):
+        self.A = Pin(A, Pin.IN)
+        self.B = Pin(B, Pin.IN)
+        self.counter = 0
+
+        self.A.irq(self.cb,self.A.IRQ_FALLING|self.A.IRQ_RISING) #interrupt on line A
+        self.B.irq(self.cb,self.B.IRQ_FALLING|self.B.IRQ_RISING) #interrupt on line B
+
+
+    def cb(self,msg):
+        other,inc = (self.B,1) if msg == self.A else (self.A,-1) #define other line and increment
+        self.counter += -inc if msg.value()!=other.value() else  inc 
+        
+    def value(self):
+        print(self.counter)
+        return self.counter
+class Motor(Count):
+    def __init__(self,m1,m2, A, B):
+        self.enc = Count(A,B)
+        self.M1 = PWM(m1, freq=50, duty_u16=0)
+        self.M2 = PWM(m2, freq=50, duty_u16=0)
+        self.stop()
+        
+    def pos(self):
+        print(self.enc.value())        
+            
+    def stop(self):
+        self.M1.duty_u16(0) 
+        self.M2.duty_u16(0) 
+
+    def start(self, direction = 0, speed = 50):
+        if direction:
+            self.M1.duty_u16(int(speed*65535/100)) 
+            self.M2.duty_u16(0)
+        else:
+            self.M1.duty_u16(0)
+            self.M2.duty_u16(int(speed*65535/100))
+            print("on")
+
+
+class GroveThumbJoystick:
+    def __init__(self, channelX, channelY):
+        self.adcX = ADC(Pin(channelX))
+        self.adcY = ADC(Pin(channelY))
+
+        # Configure ADC resolution and input range
+        self.adcX.width(ADC.WIDTH_12BIT)
+        self.adcY.width(ADC.WIDTH_12BIT)
+
+        self.adcX.atten(ADC.ATTN_11DB)
+        self.adcY.atten(ADC.ATTN_11DB)
+
+    @property
+    def value(self):
+        return self.adcX.read(), self.adcY.read()
+
+
+Grove = GroveThumbJoystick
+ 
+def forward():
+    print("forward")
+    Motor1.start()
+    time.sleep(1)
+    Motor1.stop()
+    
+def back():
+    print("back")
+    Motor1.start(1, 50)
+    time.sleep(1)
+    Motor1.stop()
+    
+def evade(curr_pos):
+    direction = random.randint(1, 2)
+    if curr_pos == -2:
+        forward()
+        return -1
+    elif curr_pos == -1:
+        if direction == 1:
+            forward()
+            return 0
+        else:
+            back()
+            return -2
+    elif curr_pos == 0:
+        if direction == 1:
+            forward()
+            return 1
+        else:
+            back()
+            return -1
+    elif curr_pos == 1:
+        if direction == 1:
+            forward()
+            return 2
+        else:
+            back()
+            return 0
+    elif curr_pos == 2:
+        back()
+        return 1
+    
+Motor1 = Motor(14,27, 32,39) #first two are motor pins, last two are encoder pins         
+data = []
+color = ""
+index = 0
+position = 0
+JOYSTICK_X_PIN = 36
+JOYSTICK_Y_PIN = 39
+joySensor = GroveThumbJoystick(JOYSTICK_X_PIN, JOYSTICK_Y_PIN)
+
+while True:
+#     training
+    red, green, blue, white = sensor.read_rgbw()
+    if(STATE_TRAIN and pressed_flag):
+        print(red, green, blue, white)
+        index = index+1
+        if index <= 1:
+            for i in range(15):
+                color = "red"
+                data.append((red, green, blue, color))
+                pressed_flag = False
+        elif index >1 and index<=2:
+            for i in range(15):
+                color = "blue"
+                data.append((red, green, blue, color))
+                pressed_flag = False
+        else:
+            color = "no clue"
+
+        print(data)
+
+#   detection       
+                
+    if(STATE_PLAY):
+        
+#         X, Y = 1953 2978
+        x, y = joySensor.value
+        if x >= 2200:
+            np[0] = (0, 0, 0)
+            np[1]  = (100, 100, 100)
+            np.write()
+            print("small")
+        elif x <= 1700:
+            np[0] = (100, 100, 100)
+            np[1] = (0, 0, 0)
+            np.write()
+            
+        if y >= 3200:
+            print(y)
+            back()
+            print("small")
+        elif y <= 2700:
+            print(y)
+            forward()
+            
+        if k_nearest_neighbor(red, green, blue,7) == "red":
+            print("HELPPPPPP")
+            buzzer.freq(200)
+            np[0] = (100, 0, 0)
+            np[1] = (100, 0, 0)
+            np.write()
+            position = evade(position)
+        else:
+#             np[0] = (100, 100, 100)
+#             np[1] = (100, 100, 100)
+#             np.write()
+            buzzer.freq(1)
+            print("ok we hella chill")
+#         STATE_PLAY = False
+    time.sleep(.1)
+    if pin.value():
+        np[0] = (0, 0, 0)
+        np[1] = (0, 0, 0)
+        np.write()
+        
+
