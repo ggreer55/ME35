@@ -1,0 +1,64 @@
+import encoder
+import time
+import math
+import neopixel #importing the library
+from machine import Pin # another way of importing a library
+lights = neopixel.NeoPixel(Pin(0),4) # 0 is the Pin for neopixel and 4 is the number of lights
+lights[0] = (20,0,20) # set the color of 0th light to purple
+lights.write()
+
+
+from machine import PWM, Pin
+servo1 = PWM(Pin(4), freq=50, duty_u16=0)
+servo2 = PWM(Pin(5), freq=50, duty_u16=0)
+# or from encoder import Count
+count = encoder.Count(21,22)
+count2 = encoder.Count(25,26)
+# or count = Count(32,39)
+
+def fromController():
+    #print(count.value())
+    encoderBaseVal = ((count.value() + 1000)/1000) + 0.5
+    encoderArmVal = ((count2.value() + 480)/480) + 0.5
+    time.sleep(0.1)
+    if encoderBaseVal > 2.5:
+        encoderBaseVal = 2.5
+    elif encoderBaseVal < .5:
+        encoderBaseVal = .5
+
+    if encoderArmVal > 2.5:
+        encoderArmVal = 2.5
+    elif encoderArmVal < .5:
+        encoderArmVal = .5
+    
+    servo1.duty_u16(int(encoderBaseVal*65535 /20))
+    servo2.duty_u16(int(encoderArmVal*65535/20))
+
+squareBase = # paste "outTheta1.csv" data here
+sqaureArm = # paste "outTheta2.csv" data here
+led = Pin(32, Pin.OUT)
+led.value(1)
+
+def square():
+    for i in range(len(squareBase)):
+        currPosBase = ((squareBase[i]*2.0)/math.pi) + .5
+        currPosArm = ((sqaureArm[i]*2.0)/math.pi) + .5
+
+        servo1.duty_u16(int(currPosBase*65535/20))
+        time.sleep(0.01)
+        servo2.duty_u16(int(currPosArm*65535/20))
+        time.sleep(0.01)
+
+
+
+
+
+        #print( currPosBase, currPosArm)
+
+
+
+#while True:
+
+square()
+print("done")
+led.value(0)
