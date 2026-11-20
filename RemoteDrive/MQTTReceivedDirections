@@ -1,0 +1,173 @@
+import network, time, json, neopixel
+from machine import Pin, PWM
+from umqtt.simple import MQTTClient
+import secrets
+
+# ---- EDIT to match your HW8 wiring ----
+LEFT_PINS, RIGHT_PINS = (12, 13), (14, 27)
+NEO_PIN, NUM_LEDS = 15, 2
+LEFT_SIGN, RIGHT_SIGN = 1, 1  # flip to -1 if a motor spins the wrong way
+# ---------------------------------------
+
+SSID = secrets.SSID
+PASSWORD = secrets.PWD
+MQTT_BROKER = secrets.mqtt_url  # set on test day
+MQTT_PORT = secrets.port
+CLIENT_ID = "esp32SOPHIE"
+TOPICS = ("ME35/speed", "ME35/direction", "ME35/led/0", "ME35/led/1")
+PING_EVERY = 10  # seconds; detects a silently dead connection
+
+
+class Motor:
+    def __init__(self, a, b, sign):
+        self.a, self.b, self.sign = PWM(Pin(a), freq=1000), PWM(Pin(b), freq=1000), sign
+
+    def run(self, v):  # v: -100..100
+        v *= self.sign
+        d = int(abs(v) * 65535 / 100)
+        self.a.duty_u16(d if v > 0 else 0)
+        self.b.duty_u16(d if v < 0 else 0)
+
+
+left, right = Motor(*LEFT_PINS, LEFT_SIGN), Motor(*RIGHT_PINS, RIGHT_SIGN)
+np = neopixel.NeoPixel(Pin(NEO_PIN), NUM_LEDS)
+colors = [(0, 0, 0)] * NUM_LEDS  # last commanded color per LED
+
+
+def show(rgbs):
+    for i, c in enumerate(rgbs):
+        np[i] = c
+    np.write()
+
+
+def flash_red(seconds):
+    """Blink both LEDs red for the given time."""
+    on = True
+    for _ in range(int(seconds * 4)):
+        show([(80, 0, 0) if on else (0, 0, 0)] * NUM_LEDS)
+        on = not on
+        time.sleep(0.25)
+
+
+# Startup self-test: both LEDs flash blue, then turn off
+show([(0, 0, 50)] * NUM_LEDS)
+time.sleep(0.5)
+show(colors)
+
+# (left wheel, right wheel) multipliers. Turns spin the wheels in opposite directions.
+DIRS = {"forward": (1, 1), "backward": (-1, -1), "left": (-1, 1), "right": (1, -1), "stop": (0, 0)}
+state = {"speed": 20, "dir": "stop"}
+
+
+def parse_dir(m):
+    """Map a message to a direction name, tolerating variants like 'Left', 'turn left', 'back'."""
+    m = m.lower().strip().strip('"\'')
+    if m in DIRS:
+        return m
+    if "left" in m:
+        return "left"
+    if "right" in m:
+        return "right"
+    if m.startswith(("fwd", "for", "up")):
+        return "forward"
+    if m.startswith(("back", "rev", "down")):
+        return "backward"
+    if m.startswith(("stop", "halt")):
+        return "stop"
+    return None
+
+
+def drive():
+    l, r = DIRS[state["dir"]]
+    lv, rv = l * state["speed"], r * state["speed"]
+    left.run(lv)
+    right.run(rv)
+    print(f"dir={state['dir']} speed={state['speed']} -> left={lv} right={rv}")
+
+
+def set_led(idx, payload):
+    """Expects JSON like {"r": 255, "g": 0, "b": 122} with ints 0-255."""
+    c = json.loads(payload)
+    r, g, b = c["r"], c["g"], c["b"]
+    if not all(isinstance(v, int) and 0 <= v <= 255 for v in (r, g, b)):
+        raise ValueError("r, g, b must be integers 0-255")
+    colors[idx] = (r, g, b)
+    show(colors)
+    print(f"LED{idx} -> {(r, g, b)}")
+
+
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print("Connecting to WiFi...")
+        wlan.connect(SSID, PASSWORD)
+        for _ in range(5):  # ~10 s, flashing red while waiting
+            if wlan.isconnected():
+                break
+            flash_red(2)
+    if wlan.isconnected():
+        print("WiFi Connected! IP:", wlan.ifconfig()[0])
+        return True
+    print("WiFi connection failed!")
+    return False
+
+
+def sub_cb(topic, msg):
+    t, m = topic.decode(), msg.decode().strip()
+    print(f"Received on '{t}': '{m}'")
+    try:
+        if t == "ME35/speed":
+            state["speed"] = max(0, min(100, int(float(m))))
+            drive()
+        elif t == "ME35/direction":
+            d = parse_dir(m)
+            if d is None:
+                print(f"Unknown direction: {repr(m)}")
+                return
+            state["dir"] = d
+            drive()
+        elif t in ("ME35/led/0", "ME35/led/1"):
+            set_led(int(t[-1]), m)
+    except Exception as e:
+        print(f"Bad message on {t}: {repr(e)}")
+
+
+def mqtt_connect():
+    try:
+        client = MQTTClient(
+            client_id=CLIENT_ID,
+            server=MQTT_BROKER,
+            port=MQTT_PORT,
+            keepalive=30,
+            ssl_params={'server_hostname': MQTT_BROKER}
+        )
+        client.set_callback(sub_cb)
+        client.connect()
+        for t in TOPICS:
+            client.subscribe(t)
+        print("MQTT Connected successfully!")
+        return client
+    except Exception as e:
+        print(f"MQTT Connection failed: {e}")
+        return None
+
+
+while True:
+    if connect_wifi():
+        client = mqtt_connect()
+        if client:
+            show(colors)  # connected: restore last colors
+            last_ping = time.time()
+            try:
+                while True:
+                    client.check_msg()
+                    if time.time() - last_ping >= PING_EVERY:
+                        client.ping()
+                        last_ping = time.time()
+                    time.sleep_ms(20)
+            except Exception as e:
+                print(f"Connection lost: {e}")
+                state["dir"] = "stop"
+                drive()  # fail safe: stop motors
+                flash_red(2)  # disconnected: flash red, then retry
